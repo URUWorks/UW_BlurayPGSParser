@@ -192,6 +192,7 @@ begin
 
       if ds <> NIL then
       begin
+        ds^.IsForced := (co.ObjectCroppedFlag = ocfForceDisplay);
         ds^.X := Read2Bytes(co.ObjectHorizontalPosition);
         ds^.Y := Read2Bytes(co.ObjectVerticalPosition);
       end;
