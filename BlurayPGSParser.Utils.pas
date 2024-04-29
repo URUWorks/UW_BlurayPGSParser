@@ -141,7 +141,7 @@ end;
 function YCbCr2FPColor(Y, Cb, Cr, A: Byte): TFPColor;
 begin
   Result := TColorToFPColor(YCbCr2RGB(Y, Cb, Cr));
-  Result.Alpha := A;
+  Result.Alpha := A * $101;
 end;
 
 // -----------------------------------------------------------------------------
