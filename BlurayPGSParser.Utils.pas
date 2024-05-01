@@ -20,7 +20,7 @@
 
 unit BlurayPGSParser.Utils;
 
-{$mode ObjFPC}{$H+}
+{$I BlurayPGSParser.inc}
 
 interface
 
@@ -34,10 +34,13 @@ procedure Set3Bytes(var ADest: array of Byte; const ASource: Integer);
 function Read4Bytes(const ASource: array of Byte): Integer;
 procedure Set4Bytes(var ADest: array of Byte; const ASource: Integer);
 
-function TimestampToMS(const ATime: Integer): Integer;
+function TimestampToMs(const ATimestamp: Integer): Integer;
+function MsToTimestamp(const ATimeMS: Integer): Integer;
 
-function YCbCr2FPColor(Y, Cb, Cr, A: Byte): TFPColor;
+procedure FPColorToYCbCr(const AColor: TFPColor; out Y, Cb, Cr: Byte);
+function YCbCrToFPColor(Y, Cb, Cr, A: Byte): TFPColor;
 
+function EncodeImage(const AImage: TBGRABitmap; out ABuffer: TBytes; out APalette: TFPPalette): Integer;
 function DecodeImage(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer): TBGRABitmap;
 
 //------------------------------------------------------------------------------
@@ -45,7 +48,7 @@ function DecodeImage(const ABuffer: TBytes; const APalette: TFPPalette; const AW
 implementation
 
 uses
-  BGRABitmapTypes;
+  BGRABitmapTypes, BGRAColorQuantization;
 
 // -----------------------------------------------------------------------------
 
@@ -63,6 +66,25 @@ begin
   if Length(ADest) < 2 then Exit;
   ADest[0] := Byte(ASource shr 8);
   ADest[1] := Byte(ASource);
+end;
+
+// -----------------------------------------------------------------------------
+
+function Read3Bytes(const ASource: array of Byte): Integer;
+begin
+  Result := 0;
+  if Length(ASource) < 3 then Exit;
+  Result := (ASource[2] shl 16) + (ASource[1] shl 8) + ASource[0];
+end;
+
+// -----------------------------------------------------------------------------
+
+procedure Set3Bytes(var ADest: array of Byte; const ASource: Integer);
+begin
+  if Length(ADest) < 3 then Exit;
+  ADest[0] := Byte(ASource);
+  ADest[1] := Byte(ASource shr 8);
+  ADest[2] := Byte(ASource shr 16);
 end;
 
 // -----------------------------------------------------------------------------
@@ -87,45 +109,45 @@ end;
 
 // -----------------------------------------------------------------------------
 
-function Read3Bytes(const ASource: array of Byte): Integer;
-begin
-  Result := 0;
-  if Length(ASource) < 3 then Exit;
-  Result := (ASource[2] shl 16) + (ASource[1] shl 8) + ASource[0];
-end;
-
-// -----------------------------------------------------------------------------
-
-procedure Set3Bytes(var ADest: array of Byte; const ASource: Integer);
-begin
-  if Length(ADest) < 3 then Exit;
-  ADest[0] := Byte(ASource);
-  ADest[1] := Byte(ASource shr 8);
-  ADest[2] := Byte(ASource shr 16);
-end;
-
-// -----------------------------------------------------------------------------
-
 { Timestamps conversion }
 
 // -----------------------------------------------------------------------------
 
-function TimestampToMS(const ATime: Integer): Integer;
+function TimestampToMs(const ATimestamp: Integer): Integer;
 begin
-  Result := ATime div 90;
+  Result := ATimestamp div 90;
 end;
 
 // -----------------------------------------------------------------------------
 
-{ Color conversion }
+function MsToTimestamp(const ATimeMS: Integer): Integer;
+begin
+  Result := ATimeMS * 90;
+end;
 
 // -----------------------------------------------------------------------------
 
-function YCbCr2RGB(Y, Cb, Cr: Integer): TColor;
+{ BT.601 color conversion }
+
+// -----------------------------------------------------------------------------
+
+procedure FPColorToYCbCr(const AColor: TFPColor; out Y, Cb, Cr: Byte);
+begin
+  with AColor do
+  begin
+    Y  := EnsureRange(Round(0.299 * Red + 0.587 * Green + 0.114 * Blue), 16, 235);
+    Cb := EnsureRange(Round(-0.169 * Red - 0.331 * Green + 0.5 * Blue) + 128, 16, 240);
+    Cr := EnsureRange(Round(0.5 * Red - 0.419 * Green - 0.081 * Blue) + 128, 16, 240);
+  end;
+end;
+
+// -----------------------------------------------------------------------------
+
+function YCbCrToRGB(Y, Cb, Cr: Integer): TColor;
 var
   R, G, B: Integer;
 begin
-  Y := Y + 16;
+  Y  := Y + 16;
   Cb := Cb - 128;
   Cr := Cr - 128;
 
@@ -138,15 +160,110 @@ end;
 
 // -----------------------------------------------------------------------------
 
-function YCbCr2FPColor(Y, Cb, Cr, A: Byte): TFPColor;
+function YCbCrToFPColor(Y, Cb, Cr, A: Byte): TFPColor;
 begin
-  Result := TColorToFPColor(YCbCr2RGB(Y, Cb, Cr));
+  Result := TColorToFPColor(YCbCrToRGB(Y, Cb, Cr));
   Result.Alpha := A * $101;
 end;
 
 // -----------------------------------------------------------------------------
 
-{ DecodeImage }
+{ RLE }
+
+// -----------------------------------------------------------------------------
+
+function EncodeImage(const AImage: TBGRABitmap; out ABuffer: TBytes; out APalette: TFPPalette): Integer;
+var
+  bmp : TBGRABitmap;
+  quant : TBGRAColorQuantizer;
+  x, y, i, len : Integer;
+  p, r : PBGRAPixel;
+  bytes : TBytesStream;
+  clr : Integer;
+begin
+  // Reduce image
+  bmp := TBGRABitmap.Create(AImage);
+  quant := TBGRAColorQuantizer.Create(bmp, acFullChannelInPalette, 256); // reduce colors
+  try
+    quant.ApplyDitheringInplace(daNearestNeighbor, bmp);
+    bmp.UsePalette := True;
+    APalette := TFPPalette.Create(quant.ReducedPalette.Count);
+    bmp.Palette.Count := APalette.Count;
+    for i := 0 to quant.ReducedPalette.Count-1 do // copy reduced colors to palette
+    begin
+      bmp.Palette[i] := (quant.ReducedPalette.Color[i].ToFPColor);
+      APalette.Color[i] := bmp.Palette[i];
+    end;
+
+    // RLE compress image
+    bytes := TBytesStream.Create;
+    try
+      for y := 0 to bmp.Height-1 do
+      begin
+        p := bmp.Scanline[y];
+        x := 0;
+        while x < bmp.Width do
+        begin
+          i := quant.ReducedPalette.IndexOfColor(p[x]);
+          if i >= 0 then
+            clr := i
+          else
+            clr := quant.ReducedPalette.FindNearestColorIndex(p[x]);
+
+          r := bmp.Scanline[y];
+          len := 1;
+          while (x + len < bmp.Width) and (len < $3FFF) do
+          begin
+            if r[x + len] <> p[x] then Break;
+            Inc(len);
+          end;
+
+          if (len <= 2) and (clr <> 0) then // One pixel in color C
+          begin
+            bytes.WriteByte(clr);
+            if len = 2 then bytes.WriteByte(clr);
+          end
+          else
+          begin
+            // rle id
+            bytes.WriteByte(0);
+
+            if (clr = 0) and (len < $40) then // L pixels in color 0 (L between 1 and 63)
+              bytes.WriteByte(len)
+            else if (clr = 0) then  // L pixels in color 0 (L between 64 and 16383)
+            begin
+              bytes.WriteByte($40 or (len shr 8));
+              bytes.WriteByte(len);
+            end
+            else if len < $40 then // L pixels in color C (L between 3 and 63)
+            begin
+              bytes.WriteByte($80 or len);
+              bytes.WriteByte(clr);
+            end
+            else // L pixels in color C (L between 64 and 16383)
+            begin
+              bytes.WriteByte($C0 or (len shr 8));
+              bytes.WriteByte(len);
+              bytes.WriteByte(clr);
+            end;
+          end;
+          Inc(x, len);
+        end;
+        // end rle id
+        bytes.WriteByte(0);
+        bytes.WriteByte(0);
+      end;
+    finally
+      Result := bytes.Size;
+      SetLength(ABuffer, Result);
+      Move(bytes.Bytes[0], ABuffer[0], Result);
+      bytes.Free;
+    end;
+  finally
+    quant.Free;
+    bmp.Free;
+  end;
+end;
 
 // -----------------------------------------------------------------------------
 
