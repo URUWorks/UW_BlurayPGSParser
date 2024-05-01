@@ -20,7 +20,7 @@
 
 unit BlurayPGSParser;
 
-{$mode ObjFPC}{$H+}
+{$I BlurayPGSParser.inc}
 
 interface
 
@@ -52,6 +52,8 @@ type
   published
     property DisplaySets: TDisplaySetList read FDSList write FDSList;
   end;
+
+procedure WriteSUPDisplaySet(const AStream: TStream; const ACompositionNumber: Integer; const AInCue, AOutCue: Integer; const AImage: TBGRABitmap; const AVideoWidth, AVideoHeight: Integer; const AMargins: TRect; const AAlignment: TAlignment = taCenter; const AVerticalAlignment: TVerticalAlignment = taAlignBottom);
 
 implementation
 
@@ -124,11 +126,13 @@ begin
   begin
     if (PGS.PG[0] <> mwP) and (pgs.PG[1] <> mwG) then
     begin
-      WriteLn('PGS not found at ', FFileStream.Position-SizeOf(PGS));
+      {$IFDEF DEBUG}WriteLn('PGS not found at ', FFileStream.Position-SizeOf(PGS));{$ENDIF}
       Continue;
     end;
 
+    {$IFDEF DEBUG}
     WriteLn(Format('Segment #: %d, Type: %d, Position: %d, Size: %d', [SegmentCount, PGS.SegmentType, FFileStream.Position-SizeOf(PGS), Read2Bytes(PGS.SegmentSize)]));
+    {$ENDIF}
 
     P := FFileStream.Position;
     try
@@ -140,7 +144,7 @@ begin
 
     Inc(SegmentCount);
   end;
-  WriteLn('* DSCount: ', FDSList.Count);
+  {$IFDEF DEBUG}WriteLn('* DSCount: ', FDSList.Count);{$ENDIF}
   Result := FDSList.Count > 0;
 end;
 
@@ -170,7 +174,7 @@ begin
     begin
       New(ds);
       ds^.Completed := False;
-      ds^.InCue := TimestampToMS(Read4Bytes(APGS.PTS));
+      ds^.InCue := TimestampToMs(Read4Bytes(APGS.PTS));
     end
     else
     begin
@@ -178,7 +182,7 @@ begin
       if (ds <> NIL) and not ds^.Completed then
       begin
         ds^.Completed := True;
-        ds^.OutCue := TimestampToMS(Read4Bytes(APGS.PTS));
+        ds^.OutCue := TimestampToMs(Read4Bytes(APGS.PTS));
       end;
     end;
 
@@ -315,8 +319,10 @@ begin
     stfPCS: Result := ParsePCS(AStream, APGS);
     stfWDS: Result := ParseWDS(AStream, APGS);
     stfEND: Result := ParseEND(AStream, APGS);
+  {$IFDEF DEBUG}
   else
     WriteLn('Unknown segment type');
+  {$ENDIF}
   end;
 end;
 
@@ -354,8 +360,8 @@ begin
 
             for i := 0 to c-1 do
             begin
-              pal[Entries[i].PaletteEntryID] := YCbCr2FPColor(Entries[i].Luminance, Entries[i].ColorDifferenceBlue, Entries[i].ColorDifferenceRed, Entries[i].Transparency);
-              //WriteLn(i, ' ', Entries[i].PaletteEntryID, ': Y:', Entries[i].Luminance, ' Cb:', Entries[i].ColorDifferenceBlue, ' Cr:', Entries[i].ColorDifferenceRed, ' a:', Entries[i].Transparency);
+              pal[Entries[i].PaletteEntryID] := YCbCrToFPColor(Entries[i].Luminance, Entries[i].ColorDifferenceBlue, Entries[i].ColorDifferenceRed, Entries[i].Transparency);
+              //{$IFDEF DEBUG}WriteLn(i, ' ', Entries[i].PaletteEntryID, ': Y:', Entries[i].Luminance, ' Cb:', Entries[i].ColorDifferenceBlue, ' Cr:', Entries[i].ColorDifferenceRed, ' a:', Entries[i].Transparency);{$ENDIF}
             end;
           end;
         end;
@@ -375,6 +381,229 @@ begin
       end;
     end;
   end;
+end;
+
+// -----------------------------------------------------------------------------
+
+{ WriteSUPDisplaySet }
+
+// -----------------------------------------------------------------------------
+
+procedure WriteSUPDisplaySet(const AStream: TStream; const ACompositionNumber: Integer; const AInCue, AOutCue: Integer; const AImage: TBGRABitmap; const AVideoWidth, AVideoHeight: Integer; const AMargins: TRect; const AAlignment: TAlignment = taCenter; const AVerticalAlignment: TVerticalAlignment = taAlignBottom);
+var
+  pal : TFPPalette = NIL;
+  rlebuf : TBytes;
+  rlesize : Integer;
+  x, it, ft : Integer;
+  Xoffset, Yoffset : Integer;
+  Y, Cb, Cr : Byte;
+  pgs : TPGS;
+  pcs : TPCS;
+  wds : TWDSNumberOfWindows;
+  wdse : TWDSEntry;
+  pds : TPDS;
+  pdse : TPDSEntry;
+  ods : TODS;
+  odse : TODSEntry;
+  co  : TCO;
+begin
+  // Set 90kHz times
+  it := MsToTimestamp(AInCue);
+  ft := MsToTimestamp(AOutCue);
+
+  // Get image buffer/pallete
+  rlesize := EncodeImage(AImage, rlebuf, pal);
+
+  // Prepare alignments
+  case AAlignment of
+    taLeftJustify : case AVerticalAlignment of
+                      taVerticalCenter : begin
+                                           Xoffset := AMargins.Left;
+                                           Yoffset := (AVideoHeight - AImage.Height) div 2;
+                                         end;
+                      taAlignTop       : begin
+                                           Xoffset := AMargins.Left;
+                                           Yoffset := AMargins.Top;
+                                         end;
+                    else
+                      Xoffset := AMargins.Left;
+                      Yoffset := AVideoHeight - (AImage.Height + AMargins.Bottom);
+                end;
+
+    taCenter : case AVerticalAlignment of
+                 taVerticalCenter : begin
+                                      Xoffset := (AVideoWidth - AImage.Width) div 2;
+                                      Yoffset := (AVideoHeight - AImage.Height) div 2;
+                                    end;
+                 taAlignTop       : begin
+                                      Xoffset := (AVideoWidth - AImage.Width) div 2;
+                                      Yoffset := AMargins.Top;
+                                    end
+                 else
+                   Xoffset := (AVideoWidth - AImage.Width) div 2;
+                   Yoffset := AVideoHeight - (AImage.Height + AMargins.Bottom);
+                 end;
+
+    taRightJustify : case AVerticalAlignment of
+                       taVerticalCenter : begin
+                                            Xoffset := AVideoWidth - AImage.Width - AMargins.Right;
+                                            Yoffset := (AVideoHeight - AImage.Height) div 2;
+                                          end;
+                       taAlignTop       : begin
+                                            Xoffset := AVideoWidth - AImage.Width - AMargins.Right;
+                                            Yoffset := AMargins.Top;
+                                          end;
+                     else
+                       Xoffset := AVideoWidth - AImage.Width - AMargins.Right;
+                       Yoffset := AVideoHeight - (AImage.Height + AMargins.Bottom);
+                     end;
+  end;
+
+  // PCS 'IT'
+  with pgs do
+  begin
+    Set2Bytes(PG, mwPG);
+    Set4Bytes(PTS, it);
+    Set4Bytes(DTS, 0);
+    SegmentType := stfPCS;
+    Set2Bytes(SegmentSize, SizeOf(pcs) + SizeOf(co));
+  end;
+  AStream.Write(pgs, SizeOf(pgs));
+  with pcs do
+  begin
+    Set2Bytes(VideoWidth, AVideoWidth);
+    Set2Bytes(VideoHeight, AVideoHeight);
+    FrameRate := frf23976;
+    Set2Bytes(CompositionNumber, ACompositionNumber);
+    CompositionState := csfEpochStart;
+    PaletteUpdateFlag := pufFalse;
+    PaletteID := 0;
+    NumberOfCompositionObjects := 1;
+  end;
+  AStream.Write(pcs, SizeOf(pcs));
+  // CO
+  with co do
+  begin
+    Set2Bytes(ObjectID, 0);
+    WindowID := 0;
+    ObjectCroppedFlag := ocfOff;
+    Set2Bytes(ObjectHorizontalPosition, Xoffset);
+    Set2Bytes(ObjectVerticalPosition, Yoffset);
+  end;
+  AStream.Write(co, SizeOf(co));
+
+  // WDS
+  with pgs do
+  begin
+    SegmentType := stfWDS;
+    Set2Bytes(SegmentSize, SizeOf(wds) + SizeOf(wdse));
+  end;
+  AStream.Write(pgs, SizeOf(pgs));
+  wds := 1;
+  AStream.Write(wds, SizeOf(wds));
+  with wdse do
+  begin
+    WindowID := 0;
+    Set2Bytes(WindowHorizontalPosition, Xoffset);
+    Set2Bytes(WindowVerticalPosition, Yoffset);
+    Set2Bytes(WindowWidth, AImage.Width);
+    Set2Bytes(WindowHeight, AImage.Height);
+  end;
+  AStream.Write(wdse, SizeOf(wdse));
+
+  // PDS
+  with pgs do
+  begin
+    SegmentType := stfPDS;
+    Set2Bytes(SegmentSize, SizeOf(pds) + (SizeOf(pdse) * pal.Count));
+  end;
+  AStream.Write(pgs, SizeOf(pgs));
+  with pds do
+  begin
+    PaletteID := 0;
+    PaletteVersionNumber := 0;
+    AStream.Write(pds, SizeOf(pds));
+    with pdse do
+    begin
+      for x := 0 to pal.Count-1 do
+      begin
+        PaletteEntryID := x;
+        FPColorToYCbCr(pal.Color[x], Y, Cb, Cr);
+        Luminance := Y;
+        ColorDifferenceRed := Cr;
+        ColorDifferenceBlue := Cb;
+        Transparency := pal.Color[x].Alpha;
+        AStream.Write(pdse, SizeOf(pdse));
+      end;
+    end;
+    pal.Free;
+  end;
+
+  // ODS
+  with pgs do
+  begin
+    SegmentType := stfODS;
+    Set2Bytes(SegmentSize, SizeOf(ods) + SizeOf(odse) + rlesize);
+  end;
+  AStream.Write(pgs, SizeOf(pgs));
+  with ods do
+  begin
+    Set2Bytes(ObjectID, 0);
+    ObjectVersionNumber := 0;
+    LastInSequenceFlag := lsfFirstAndLast;
+  end;
+  AStream.Write(ods, SizeOf(ods));
+  with odse do
+  begin
+    Set3Bytes(ObjectDataLength, rlesize + 4);
+    Set2Bytes(Width, AImage.Width);
+    Set2Bytes(Height, AImage.Height);
+  end;
+  AStream.Write(odse, SizeOf(odse));
+  AStream.Write(rlebuf[0], rlesize); // RLE Data
+  SetLength(rlebuf, 0);
+
+  // END 'IT'
+  with pgs do
+  begin
+    SegmentType := stfEND;
+    Set2Bytes(SegmentSize, 0);
+  end;
+  AStream.Write(pgs, SizeOf(pgs));
+
+  // PCS 'FT'
+  with pgs do
+  begin
+    Set4Bytes(PTS, ft);
+    SegmentType := stfPCS;
+    Set2Bytes(SegmentSize, SizeOf(pcs));
+  end;
+  AStream.Write(pgs, SizeOf(pgs));
+  with pcs do
+  begin
+    Set2Bytes(CompositionNumber, ACompositionNumber + 1);
+    CompositionState := csfNormal;
+    NumberOfCompositionObjects := 0;
+  end;
+  AStream.Write(pcs, SizeOf(pcs));
+
+  // WDS
+  with pgs do
+  begin
+    SegmentType := stfWDS;
+    Set2Bytes(SegmentSize, SizeOf(wds) + SizeOf(wdse));
+  end;
+  AStream.Write(pgs, SizeOf(pgs));
+  AStream.Write(wds, SizeOf(wds));
+  AStream.Write(wdse, SizeOf(wdse));
+
+  // END 'FT'
+  with pgs do
+  begin
+    SegmentType := stfEND;
+    Set2Bytes(SegmentSize, 0);
+  end;
+  AStream.Write(pgs, SizeOf(pgs));
 end;
 
 // -----------------------------------------------------------------------------
