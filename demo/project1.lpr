@@ -1,7 +1,9 @@
 program project1;
 
 {$mode objfpc}{$H+}
-{$APPTYPE CONSOLE}
+{$IFOPT D+}
+  {$APPTYPE CONSOLE}
+{$ENDIF}
 
 uses
   {$IFDEF UNIX}
