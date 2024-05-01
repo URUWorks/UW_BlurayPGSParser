@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CONFIG>
+  <Package Version="5">
+    <PathDelim Value="\"/>
+    <Name Value="UW_BlurayPGSParser"/>
+    <Type Value="RunAndDesignTime"/>
+    <CompilerOptions>
+      <Version Value="11"/>
+      <PathDelim Value="\"/>
+      <SearchPaths>
+        <UnitOutputDirectory Value="lib\$(TargetCPU)-$(TargetOS)"/>
+      </SearchPaths>
+    </CompilerOptions>
+    <Version Minor="1"/>
+    <Files>
+      <Item>
+        <Filename Value="BlurayPGSParser.pas"/>
+        <UnitName Value="BlurayPGSParser"/>
+      </Item>
+      <Item>
+        <Filename Value="BlurayPGSParser.Types.pas"/>
+        <UnitName Value="BlurayPGSParser.Types"/>
+      </Item>
+      <Item>
+        <Filename Value="BlurayPGSParser.Utils.pas"/>
+        <UnitName Value="BlurayPGSParser.Utils"/>
+      </Item>
+    </Files>
+    <RequiredPkgs>
+      <Item>
+        <PackageName Value="BGRABitmapPack"/>
+      </Item>
+      <Item>
+        <PackageName Value="FCL"/>
+      </Item>
+    </RequiredPkgs>
+    <UsageOptions>
+      <UnitPath Value="$(PkgOutDir)"/>
+    </UsageOptions>
+    <PublishOptions>
+      <Version Value="2"/>
+      <UseFileFilters Value="True"/>
+    </PublishOptions>
+  </Package>
+</CONFIG>
