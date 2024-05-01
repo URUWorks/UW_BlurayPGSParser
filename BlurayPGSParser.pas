@@ -36,7 +36,7 @@ type
     FDSList: TDisplaySetList;
     FFileStream : TFileStream;
   public
-    constructor Create(const AFileName: String);
+    constructor Create(const AFileName: String = '');
     destructor Destroy; override;
     function Parse(const AFileName: String): Boolean;
     function GetBitmap(const DisplaySetIndex: Integer): TBGRABitmap;
@@ -66,7 +66,7 @@ uses
 
 // -----------------------------------------------------------------------------
 
-constructor TBlurayPGSParser.Create(const AFileName: String);
+constructor TBlurayPGSParser.Create(const AFileName: String = '');
 begin
   FDSList := TDisplaySetList.Create;
   FFileStream := NIL;
