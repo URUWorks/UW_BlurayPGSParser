@@ -39,7 +39,8 @@ type
     constructor Create(const AFileName: String = '');
     destructor Destroy; override;
     function Parse(const AFileName: String): Boolean;
-    function GetBitmap(const DisplaySetIndex: Integer): TBGRABitmap;
+    function GetBitmap(const DisplaySetIndex: Integer; const FullColor: Boolean = True): TBGRABitmap;
+    function SaveBitmapToFile(const DisplaySetIndex: Integer; const FileName: String; const FullColor: Boolean = True): Boolean;
   private
     procedure Clear;
     function ParsePGS(const AStream: TStream; out APGS: TPGS): Boolean;
@@ -173,6 +174,7 @@ begin
     if pcs.CompositionState = csfEpochStart then
     begin
       New(ds);
+      ds^.Text := '';
       ds^.Completed := False;
       ds^.InCue := TimestampToMs(Read4Bytes(APGS.PTS));
     end
@@ -328,7 +330,7 @@ end;
 
 // -----------------------------------------------------------------------------
 
-function TBlurayPGSParser.GetBitmap(const DisplaySetIndex: Integer): TBGRABitmap;
+function TBlurayPGSParser.GetBitmap(const DisplaySetIndex: Integer; const FullColor: Boolean = True): TBGRABitmap;
 var
   ds : PDisplaySet;
   buf : TBytes;
@@ -374,12 +376,34 @@ begin
           SetLength(buf, ds^.Pictures[0].Size);
           FFileStream.Position := ds^.Pictures[0].Offset;
           FFileStream.Read(buf[0], Length(buf));
-          Result := DecodeImage(buf, pal, ds^.Width, ds^.Height);
+          if FullColor then
+            Result := DecodeImage(buf, pal, ds^.Width, ds^.Height)
+          else
+            Result := DecodeImage2Colors(buf, pal, ds^.Width, ds^.Height);
           SetLength(buf, 0);
         end;
         pal.Free;
       end;
     end;
+  end;
+end;
+
+// -----------------------------------------------------------------------------
+
+function TBlurayPGSParser.SaveBitmapToFile(const DisplaySetIndex: Integer; const FileName: String; const FullColor: Boolean = True): Boolean;
+var
+  bmp : TBGRABitmap;
+begin
+  Result := False;
+  if FileName.IsEmpty then Exit;
+
+  bmp := GetBitmap(DisplaySetIndex, FullColor);
+  if Assigned(bmp) then
+  try
+    bmp.SaveToFile(FileName);
+    Result := FileExists(FileName);
+  finally
+    bmp.Free;
   end;
 end;
 
