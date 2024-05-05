@@ -201,6 +201,7 @@ type
     Pictures  : TPictures;
     Completed : Boolean;
     IsForced  : Boolean;
+    Text      : String;
   end;
 
   TDisplaySetList = specialize TFPGList<PDisplaySet>;

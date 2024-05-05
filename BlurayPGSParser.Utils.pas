@@ -42,6 +42,7 @@ function YCbCrToFPColor(Y, Cb, Cr, A: Byte): TFPColor;
 
 function EncodeImage(const AImage: TBGRABitmap; out ABuffer: TBytes; out APalette: TFPPalette): Integer;
 function DecodeImage(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer): TBGRABitmap;
+function DecodeImage2Colors(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer): TBGRABitmap;
 
 //------------------------------------------------------------------------------
 
@@ -365,6 +366,123 @@ begin
         else // One pixel in color C
         begin
           clr.FromFPColor(APalette.Color[b]);
+          bmp.Scanline[y][x] := clr;
+          Inc(x);
+        end;
+      end;
+    end;
+    bmp.InvalidateBitmap;
+  end;
+  Result := bmp;
+end;
+
+//------------------------------------------------------------------------------
+
+function DecodeImage2Colors(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer): TBGRABitmap; // need to optimize
+const
+  Alpha = 255;
+
+var
+  bmp: TBGRABitmap;
+  x, y, idx, i, len: Integer;
+  b: Byte;
+  clr, clr0, clr1: TBGRAPixel;
+begin
+  bmp := TBGRABitmap.Create(AWidth, AHeight, BGRAPixelTransparent);
+  idx := 0;
+  y := 0;
+
+  if APalette.Count > 0 then
+  begin
+    clr0.FromFPColor(APalette.Color[0]);
+    clr1.FromRGB(255, 255, 255);
+
+    while y < bmp.Height do
+    begin
+      x := 0;
+      while x < bmp.Width do
+      begin
+        if idx >= Length(ABuffer) then
+          Break;
+
+        b := ABuffer[idx] and $FF;
+        Inc(idx);
+
+        if b = 0 then // RLE ID
+        begin
+          if idx >= Length(ABuffer) then
+            Break;
+
+          b := ABuffer[idx] and $FF;
+          Inc(idx);
+
+          if b = 0 then // Next line
+          begin
+            Inc(y);
+            Break;
+          end
+          else if (b and $C0) = $40 then // L pixels in color 0 (L between 1 and 63)
+          begin
+            if idx + 1 < Length(ABuffer) then
+            begin
+              len := ((b - $40) shl 8) or (ABuffer[idx] and $FF);
+              Inc(idx);
+              for i := 1 to len do
+              begin
+                bmp.Scanline[y][x] := clr0;
+                Inc(x);
+              end;
+            end;
+          end
+          else if (b and $C0) = $80 then // L pixels in color C (L between 64 and 16383)
+          begin
+            if idx < Length(ABuffer) then
+            begin
+              len := (b - $80);
+              b := ABuffer[idx] and $FF;
+              Inc(idx);
+              clr.FromFPColor(APalette.Color[b]);
+              for i := 1 to len do
+              begin
+                if clr.alpha < Alpha then clr := clr0 else clr := clr1;
+                bmp.Scanline[y][x] := clr;
+                Inc(x);
+              end;
+            end;
+          end
+          else if (b and $C0) <> 0 then // L pixels in color C (L between 3 and 63)
+          begin
+            if idx + 1 < Length(ABuffer) then
+            begin
+              len := ((b - $C0) shl 8) or (ABuffer[idx] and $FF);
+              Inc(idx);
+              if idx < Length(ABuffer) then
+              begin
+                b := ABuffer[idx] and $FF;
+                Inc(idx);
+                clr.FromFPColor(APalette.Color[b]);
+                if clr.alpha < Alpha then clr := clr0 else clr := clr1;
+                for i := 1 to len do
+                begin
+                  bmp.Scanline[y][x] := clr;
+                  Inc(x);
+                end;
+              end;
+            end;
+          end
+          else // L pixels in color 0 (L between 64 and 16383)
+          begin
+            for i := 1 to b do
+            begin
+              bmp.Scanline[y][x] := clr0;
+              Inc(x);
+            end;
+          end;
+        end
+        else // One pixel in color C
+        begin
+          clr.FromFPColor(APalette.Color[b]);
+          if clr.alpha < Alpha then clr := clr0 else clr := clr1;
           bmp.Scanline[y][x] := clr;
           Inc(x);
         end;
