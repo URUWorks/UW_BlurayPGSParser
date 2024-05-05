@@ -380,13 +380,23 @@ end;
 
 function DecodeImage2Colors(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer): TBGRABitmap; // need to optimize
 const
-  Alpha = 255;
+  FixValue = 162;
 
 var
   bmp: TBGRABitmap;
   x, y, idx, i, len: Integer;
   b: Byte;
   clr, clr0, clr1: TBGRAPixel;
+
+  procedure FixColor(var AColor: TBGRAPixel);
+  begin
+    if ((AColor.red < FixValue) and (AColor.green < FixValue) and
+    (AColor.blue < FixValue)) or (AColor.alpha < FixValue) then
+      clr := clr0
+    else
+      clr := clr1;
+  end;
+
 begin
   bmp := TBGRABitmap.Create(AWidth, AHeight, BGRAPixelTransparent);
   idx := 0;
@@ -444,7 +454,7 @@ begin
               clr.FromFPColor(APalette.Color[b]);
               for i := 1 to len do
               begin
-                if clr.alpha < Alpha then clr := clr0 else clr := clr1;
+                FixColor(clr);
                 bmp.Scanline[y][x] := clr;
                 Inc(x);
               end;
@@ -461,7 +471,7 @@ begin
                 b := ABuffer[idx] and $FF;
                 Inc(idx);
                 clr.FromFPColor(APalette.Color[b]);
-                if clr.alpha < Alpha then clr := clr0 else clr := clr1;
+                FixColor(clr);
                 for i := 1 to len do
                 begin
                   bmp.Scanline[y][x] := clr;
@@ -482,7 +492,7 @@ begin
         else // One pixel in color C
         begin
           clr.FromFPColor(APalette.Color[b]);
-          if clr.alpha < Alpha then clr := clr0 else clr := clr1;
+          FixColor(clr);
           bmp.Scanline[y][x] := clr;
           Inc(x);
         end;
