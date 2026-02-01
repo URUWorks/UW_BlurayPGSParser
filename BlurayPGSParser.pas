@@ -93,6 +93,7 @@ var
   i, c : Integer;
 begin
   for i := 0 to FDSList.Count-1 do
+  begin
     with FDSList[i]^ do
     begin
       for c := 0 to Length(Palettes)-1 do
@@ -102,6 +103,8 @@ begin
       SetLength(Pictures, 0);
       SetLength(Palettes, 0);
     end;
+    Dispose(FDSList[i]);
+  end;
 
   FDSList.Clear;
 end;
