@@ -42,7 +42,7 @@ function YCbCrToFPColor(Y, Cb, Cr, A: Byte): TFPColor;
 
 function EncodeImage(const AImage: TBGRABitmap; out ABuffer: TBytes; out APalette: TFPPalette): Integer;
 function DecodeImage(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer): TBGRABitmap;
-function DecodeImage2Colors(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer): TBGRABitmap;
+function DecodeImage2Colors(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer; const AThreshold: Byte = 162): TBGRABitmap;
 
 //------------------------------------------------------------------------------
 
@@ -378,10 +378,7 @@ end;
 
 //------------------------------------------------------------------------------
 
-function DecodeImage2Colors(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer): TBGRABitmap; // need to optimize
-const
-  FixValue = 162;
-
+function DecodeImage2Colors(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer; const AThreshold: Byte = 162): TBGRABitmap;
 var
   bmp: TBGRABitmap;
   x, y, idx, i, len: Integer;
@@ -389,9 +386,14 @@ var
   clr, clr0, clr1: TBGRAPixel;
 
   procedure FixColor(var AColor: TBGRAPixel);
+  var
+    IsDark: Boolean;
   begin
-    if ((AColor.red < FixValue) and (AColor.green < FixValue) and
-    (AColor.blue < FixValue)) or (AColor.alpha < FixValue) then
+    IsDark := (AColor.red < AThreshold) and
+              (AColor.green < AThreshold) and
+              (AColor.blue < AThreshold);
+
+    if IsDark or (AColor.alpha < AThreshold) then
       clr := clr0
     else
       clr := clr1;
@@ -412,16 +414,14 @@ begin
       x := 0;
       while x < bmp.Width do
       begin
-        if idx >= Length(ABuffer) then
-          Break;
+        if idx >= Length(ABuffer) then Break;
 
         b := ABuffer[idx] and $FF;
         Inc(idx);
 
         if b = 0 then // RLE ID
         begin
-          if idx >= Length(ABuffer) then
-            Break;
+          if idx >= Length(ABuffer) then Break;
 
           b := ABuffer[idx] and $FF;
           Inc(idx);
@@ -431,7 +431,7 @@ begin
             Inc(y);
             Break;
           end
-          else if (b and $C0) = $40 then // L pixels in color 0 (L between 1 and 63)
+          else if (b and $C0) = $40 then // 0 pixels
           begin
             if idx + 1 < Length(ABuffer) then
             begin
@@ -444,7 +444,7 @@ begin
               end;
             end;
           end
-          else if (b and $C0) = $80 then // L pixels in color C (L between 64 and 16383)
+          else if (b and $C0) = $80 then // C pixels (Largo)
           begin
             if idx < Length(ABuffer) then
             begin
@@ -452,15 +452,15 @@ begin
               b := ABuffer[idx] and $FF;
               Inc(idx);
               clr.FromFPColor(APalette.Color[b]);
+              FixColor(clr); // Aplicar umbral
               for i := 1 to len do
               begin
-                FixColor(clr);
                 bmp.Scanline[y][x] := clr;
                 Inc(x);
               end;
             end;
           end
-          else if (b and $C0) <> 0 then // L pixels in color C (L between 3 and 63)
+          else if (b and $C0) <> 0 then // C pixels (Corto)
           begin
             if idx + 1 < Length(ABuffer) then
             begin
@@ -471,7 +471,7 @@ begin
                 b := ABuffer[idx] and $FF;
                 Inc(idx);
                 clr.FromFPColor(APalette.Color[b]);
-                FixColor(clr);
+                FixColor(clr); // Aplicar umbral
                 for i := 1 to len do
                 begin
                   bmp.Scanline[y][x] := clr;
@@ -480,7 +480,7 @@ begin
               end;
             end;
           end
-          else // L pixels in color 0 (L between 64 and 16383)
+          else // 0 pixels (Largo)
           begin
             for i := 1 to b do
             begin
@@ -489,10 +489,10 @@ begin
             end;
           end;
         end
-        else // One pixel in color C
+        else // Un pixel color C
         begin
           clr.FromFPColor(APalette.Color[b]);
-          FixColor(clr);
+          FixColor(clr); // Aplicar umbral
           bmp.Scanline[y][x] := clr;
           Inc(x);
         end;
