@@ -1,0 +1,44 @@
+1.0 (19/09/2026)
+
+- Improved Blu-ray PGS/SUP compatibility
+
+  * Added support for display sets containing multiple subtitle objects.
+  * Improved handling of cropped composition objects and partial subtitle reveals.
+  * Added support for PGS images split across multiple ODS fragments.
+  * Improved composition of multiple subtitle images into a single bitmap.
+
+- Improved subtitle image rendering
+
+  * Correctly applies object positions and cropping information when rendering PGS subtitles.
+  * Improved support for complex subtitle layouts and simultaneous subtitle regions.
+  * Improved handling of fragmented RLE image data.
+
+- Improved PGS stream parsing
+
+  * Added more robust recovery when invalid or unexpected data is encountered in a PGS stream.
+  * Improved handling of malformed palette data.
+  * Added clearer error reporting when a file cannot be parsed as a valid PGS/SUP stream.
+  * Improved handling of large timestamps using 64-bit values.
+
+- Improved SUP subtitle generation
+
+  * Added configurable frame rate when creating SUP subtitles.
+  * Added configurable maximum palette size.
+  * Added configurable dithering algorithms for subtitle image encoding.
+  * Improved palette and transparency handling.
+
+- Improved image encoding
+
+  * Added support for limiting the number of colors used when generating PGS images.
+  * Added configurable dithering during color reduction.
+  * Improved and unified RLE image decoding.
+
+- API improvements
+
+  * Added `LastError` for retrieving parsing errors.
+  * Extended `WriteSUPDisplaySet` with optional frame rate, color limit, and dithering settings.
+  * Updated timestamp-related APIs to use 64-bit values.
+
+- Package update
+
+  * Updated the library package version to 1.0.
