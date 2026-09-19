@@ -12,7 +12,7 @@
  *  implied. See the License for the specific language governing
  *  rights and limitations under the License.
  *
- *  Copyright (C) 2023-2024 URUWorks, uruworks@gmail.com.
+ *  Copyright (C) 2023-2026 URUWorks, uruworks@gmail.com.
  *
  *  INFO: https://blog.thescorpius.com/index.php/2017/07/15/presentation-graphic-stream-sup-files-bluray-subtitle-format/
  *

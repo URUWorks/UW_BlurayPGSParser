@@ -12,7 +12,7 @@
  *  implied. See the License for the specific language governing
  *  rights and limitations under the License.
  *
- *  Copyright (C) 2023-2024 URUWorks, uruworks@gmail.com.
+ *  Copyright (C) 2023-2026 URUWorks, uruworks@gmail.com.
  *
  *  INFO: https://blog.thescorpius.com/index.php/2017/07/15/presentation-graphic-stream-sup-files-bluray-subtitle-format/
  *
@@ -174,9 +174,23 @@ type
 
   { TDisplaySet }
 
-  TPictureBuffer = packed record
+  // A single contiguous chunk of RLE data belonging to a picture. An object
+  // that is split across several ODS segments (LastInSequenceFlag) ends up
+  // with more than one chunk, which GetBitmap concatenates before decoding
+  TPictureChunk = packed record
     Offset : Int64;
     Size   : Integer;
+  end;
+
+  TPictureChunks = array of TPictureChunk;
+
+  TPictureBuffer = packed record
+    ObjectID  : Integer;       // ID of the ODS object this picture belongs to
+    Width     : Integer;
+    Height    : Integer;
+    TotalSize : Integer;       // expected total RLE size (from the first fragment header), for sanity checks
+    Completed : Boolean;       // True once the fragment with LastInSequenceFlag=lsfLast/lsfFirstAndLast has been seen
+    Chunks    : TPictureChunks;
   end;
 
   TPDSEntries = array of TPDSEntry;
@@ -186,19 +200,37 @@ type
     Entries : TPDSEntries;
   end;
 
-  TPictures = array of TPictureBuffer;
-  TPalettes = array of TPaletteItem;
+  // Position of one composition object within the display set, as declared
+  // by the PCS. Matched to a TPictureBuffer via ObjectID when rendering
+  TObjectPosition = packed record
+    ObjectID : Integer;
+    X, Y     : Integer;
+    IsForced : Boolean;
+    // Set when the PCS declared this object with ObjectCroppedFlag =
+    // ocfForceDisplay: only the CropWidth x CropHeight sub-rectangle
+    // starting at (CropX, CropY) - screen coordinates, same space as X/Y -
+    // should actually be shown (used e.g. for reveal/typewriter subtitle
+    // effects that reuse one decoded image across several PCS updates)
+    HasCrop  : Boolean;
+    CropX, CropY,
+    CropWidth, CropHeight : Integer;
+  end;
+
+  TPictures        = array of TPictureBuffer;
+  TPalettes        = array of TPaletteItem;
+  TObjectPositions = array of TObjectPosition;
 
   PDisplaySet = ^TDisplaySet;
   TDisplaySet = packed record
     InCue,
-    OutCue    : Integer;
+    OutCue    : Int64;
     X, Y,
     Width,
     Height    : Integer;
     PaletteId : Byte;
     Palettes  : TPalettes;
     Pictures  : TPictures;
+    Objects   : TObjectPositions;
     Completed : Boolean;
     IsForced  : Boolean;
     Text      : String;

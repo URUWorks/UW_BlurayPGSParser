@@ -12,7 +12,7 @@
  *  implied. See the License for the specific language governing
  *  rights and limitations under the License.
  *
- *  Copyright (C) 2023-2024 URUWorks, uruworks@gmail.com.
+ *  Copyright (C) 2023-2026 URUWorks, uruworks@gmail.com.
  *
  *  INFO: https://blog.thescorpius.com/index.php/2017/07/15/presentation-graphic-stream-sup-files-bluray-subtitle-format/
  *
@@ -25,22 +25,24 @@ unit BlurayPGSParser.Utils;
 interface
 
 uses
-  Classes, SysUtils, FPImage, Graphics, Math, BGRABitmap;
+  Classes, SysUtils, FPImage, Graphics, Math, BGRABitmap, BGRABitmapTypes;
 
 function Read2Bytes(const ASource: array of Byte): Integer;
 procedure Set2Bytes(var ADest: array of Byte; const ASource: Integer);
 function Read3Bytes(const ASource: array of Byte): Integer;
 procedure Set3Bytes(var ADest: array of Byte; const ASource: Integer);
-function Read4Bytes(const ASource: array of Byte): Integer;
-procedure Set4Bytes(var ADest: array of Byte; const ASource: Integer);
+function Read4Bytes(const ASource: array of Byte): Int64;
+procedure Set4Bytes(var ADest: array of Byte; const ASource: Int64);
 
-function TimestampToMs(const ATimestamp: Integer): Integer;
-function MsToTimestamp(const ATimeMS: Integer): Integer;
+function TimestampToMs(const ATimestamp: Int64): Int64;
+function MsToTimestamp(const ATimeMS: Int64): Int64;
 
 procedure FPColorToYCbCr(const AColor: TFPColor; out Y, Cb, Cr: Byte);
 function YCbCrToFPColor(Y, Cb, Cr, A: Byte): TFPColor;
 
-function EncodeImage(const AImage: TBGRABitmap; out ABuffer: TBytes; out APalette: TFPPalette): Integer;
+function EncodeImage(const AImage: TBGRABitmap; out ABuffer: TBytes; out APalette: TFPPalette; const AMaxColors: Integer = 256; const ADithering: TDitheringAlgorithm = daFloydSteinberg): Integer;
+
+function DecodeRLEImage(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer; const ATwoColorThreshold: Integer = -1): TBGRABitmap;
 function DecodeImage(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer): TBGRABitmap;
 function DecodeImage2Colors(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer; const AThreshold: Byte = 162): TBGRABitmap;
 
@@ -49,7 +51,7 @@ function DecodeImage2Colors(const ABuffer: TBytes; const APalette: TFPPalette; c
 implementation
 
 uses
-  BGRABitmapTypes, BGRAColorQuantization;
+  BGRAColorQuantization;
 
 // -----------------------------------------------------------------------------
 
@@ -90,22 +92,23 @@ end;
 
 // -----------------------------------------------------------------------------
 
-function Read4Bytes(const ASource: array of Byte): Integer;
+function Read4Bytes(const ASource: array of Byte): Int64;
 begin
   Result := 0;
   if Length(ASource) < 4 then Exit;
-  Result := ASource[3] + (ASource[2] shl 8) + (ASource[1] shl 16) + (ASource[0] shl 24);
+  Result := (Int64(ASource[0]) shl 24) or (Int64(ASource[1]) shl 16) or
+            (Int64(ASource[2]) shl 8) or Int64(ASource[3]);
 end;
 
 // -----------------------------------------------------------------------------
 
-procedure Set4Bytes(var ADest: array of Byte; const ASource: Integer);
+procedure Set4Bytes(var ADest: array of Byte; const ASource: Int64);
 begin
   if Length(ADest) < 4 then Exit;
-  ADest[0] := Byte(ASource shr 24);
-  ADest[1] := Byte(ASource shr 16);
-  ADest[2] := Byte(ASource shr 8);
-  ADest[3] := Byte(ASource);
+  ADest[0] := Byte((ASource shr 24) and $FF);
+  ADest[1] := Byte((ASource shr 16) and $FF);
+  ADest[2] := Byte((ASource shr 8) and $FF);
+  ADest[3] := Byte(ASource and $FF);
 end;
 
 // -----------------------------------------------------------------------------
@@ -114,14 +117,14 @@ end;
 
 // -----------------------------------------------------------------------------
 
-function TimestampToMs(const ATimestamp: Integer): Integer;
+function TimestampToMs(const ATimestamp: Int64): Int64;
 begin
   Result := ATimestamp div 90;
 end;
 
 // -----------------------------------------------------------------------------
 
-function MsToTimestamp(const ATimeMS: Integer): Integer;
+function MsToTimestamp(const ATimeMS: Int64): Int64;
 begin
   Result := ATimeMS * 90;
 end;
@@ -173,20 +176,24 @@ end;
 
 // -----------------------------------------------------------------------------
 
-function EncodeImage(const AImage: TBGRABitmap; out ABuffer: TBytes; out APalette: TFPPalette): Integer;
+function EncodeImage(const AImage: TBGRABitmap; out ABuffer: TBytes; out APalette: TFPPalette; const AMaxColors: Integer = 256; const ADithering: TDitheringAlgorithm = daFloydSteinberg): Integer;
 var
-  bmp : TBGRABitmap;
-  quant : TBGRAColorQuantizer;
-  x, y, i, len : Integer;
-  p, r : PBGRAPixel;
-  bytes : TBytesStream;
-  clr : Integer;
+  bmp: TBGRABitmap;
+  quant: TBGRAColorQuantizer;
+  x, y, i, len: Integer;
+  p, r: PBGRAPixel;
+  bytes: TBytesStream;
+  clr: Integer;
+  maxColors: Integer;
 begin
+  // PGS palettes can hold at most 256 entries
+  maxColors := EnsureRange(AMaxColors, 2, 256);
+
   // Reduce image
   bmp := TBGRABitmap.Create(AImage);
-  quant := TBGRAColorQuantizer.Create(bmp, acFullChannelInPalette, 256); // reduce colors
+  quant := TBGRAColorQuantizer.Create(bmp, acFullChannelInPalette, maxColors); // reduce colors
   try
-    quant.ApplyDitheringInplace(daNearestNeighbor, bmp);
+    quant.ApplyDitheringInplace(ADithering, bmp);
     bmp.UsePalette := True;
     APalette := TFPPalette.Create(quant.ReducedPalette.Count);
     bmp.Palette.Count := APalette.Count;
@@ -268,19 +275,48 @@ end;
 
 // -----------------------------------------------------------------------------
 
-function DecodeImage(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer): TBGRABitmap;
+function DecodeRLEImage(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer; const ATwoColorThreshold: Integer = -1): TBGRABitmap;
 var
   bmp: TBGRABitmap;
   x, y, idx, i, len: Integer;
   b: Byte;
-  clr: TBGRAPixel;
+  clr, clr0, clr1: TBGRAPixel;
+  TwoColorMode: Boolean;
+
+  // Resolves a palette index to the pixel color to paint. In two-color mode,
+  // collapses everything to either clr0 (background) or clr1 (foreground)
+  // based on luminance/alpha threshold
+  function ResolveColor(AIndex: Byte): TBGRAPixel;
+  var
+    IsDark: Boolean;
+  begin
+    Result.FromFPColor(APalette.Color[AIndex]);
+    if not TwoColorMode then Exit;
+
+    IsDark := (Result.red < ATwoColorThreshold) and
+              (Result.green < ATwoColorThreshold) and
+              (Result.blue < ATwoColorThreshold);
+
+    if IsDark or (Result.alpha < ATwoColorThreshold) then
+      Result := clr0
+    else
+      Result := clr1;
+  end;
+
 begin
+  TwoColorMode := ATwoColorThreshold >= 0;
   bmp := TBGRABitmap.Create(AWidth, AHeight, BGRAPixelTransparent);
   idx := 0;
   y := 0;
 
   if APalette.Count > 0 then
   begin
+    if TwoColorMode then
+    begin
+      clr0.FromFPColor(APalette.Color[0]);
+      clr1.FromRGB(255, 255, 255);
+    end;
+
     while y < bmp.Height do
     begin
       x := 0;
@@ -292,7 +328,7 @@ begin
         b := ABuffer[idx] and $FF;
         Inc(idx);
 
-        if b = 0 then // RLE ID
+        if b = 0 then // RLE escape
         begin
           if idx >= Length(ABuffer) then
             Break;
@@ -300,18 +336,18 @@ begin
           b := ABuffer[idx] and $FF;
           Inc(idx);
 
-          if b = 0 then // Next line
+          if b = 0 then // End of line
           begin
             Inc(y);
             Break;
           end
-          else if (b and $C0) = $40 then // L pixels in color 0 (L between 1 and 63)
+          else if (b and $C0) = $40 then // Color 0, long form (L: 64-16383)
           begin
             if idx + 1 < Length(ABuffer) then
             begin
               len := ((b - $40) shl 8) or (ABuffer[idx] and $FF);
               Inc(idx);
-              clr.FromFPColor(APalette.Color[0]);
+              clr := ResolveColor(0);
               for i := 1 to len do
               begin
                 bmp.Scanline[y][x] := clr;
@@ -319,14 +355,14 @@ begin
               end;
             end;
           end
-          else if (b and $C0) = $80 then // L pixels in color C (L between 64 and 16383)
+          else if (b and $C0) = $80 then // Color C, short form (L: 3-63)
           begin
             if idx < Length(ABuffer) then
             begin
               len := (b - $80);
               b := ABuffer[idx] and $FF;
               Inc(idx);
-              clr.FromFPColor(APalette.Color[b]);
+              clr := ResolveColor(b);
               for i := 1 to len do
               begin
                 bmp.Scanline[y][x] := clr;
@@ -334,7 +370,7 @@ begin
               end;
             end;
           end
-          else if (b and $C0) <> 0 then // L pixels in color C (L between 3 and 63)
+          else if (b and $C0) <> 0 then // Color C, long form (L: 64-16383)
           begin
             if idx + 1 < Length(ABuffer) then
             begin
@@ -344,7 +380,7 @@ begin
               begin
                 b := ABuffer[idx] and $FF;
                 Inc(idx);
-                clr.FromFPColor(APalette.Color[b]);
+                clr := ResolveColor(b);
                 for i := 1 to len do
                 begin
                   bmp.Scanline[y][x] := clr;
@@ -353,9 +389,9 @@ begin
               end;
             end;
           end
-          else // L pixels in color 0 (L between 64 and 16383)
+          else // Color 0, short form (L: 1-63)
           begin
-            clr.FromFPColor(APalette.Color[0]);
+            clr := ResolveColor(0);
             for i := 1 to b do
             begin
               bmp.Scanline[y][x] := clr;
@@ -365,7 +401,7 @@ begin
         end
         else // One pixel in color C
         begin
-          clr.FromFPColor(APalette.Color[b]);
+          clr := ResolveColor(b);
           bmp.Scanline[y][x] := clr;
           Inc(x);
         end;
@@ -374,135 +410,23 @@ begin
     bmp.InvalidateBitmap;
   end;
   Result := bmp;
+end;
+
+//------------------------------------------------------------------------------
+
+function DecodeImage(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer): TBGRABitmap;
+begin
+  Result := DecodeRLEImage(ABuffer, APalette, AWidth, AHeight, -1);
 end;
 
 //------------------------------------------------------------------------------
 
 function DecodeImage2Colors(const ABuffer: TBytes; const APalette: TFPPalette; const AWidth, AHeight: Integer; const AThreshold: Byte = 162): TBGRABitmap;
-var
-  bmp: TBGRABitmap;
-  x, y, idx, i, len: Integer;
-  b: Byte;
-  clr, clr0, clr1: TBGRAPixel;
-
-  procedure FixColor(var AColor: TBGRAPixel);
-  var
-    IsDark: Boolean;
-  begin
-    IsDark := (AColor.red < AThreshold) and
-              (AColor.green < AThreshold) and
-              (AColor.blue < AThreshold);
-
-    if IsDark or (AColor.alpha < AThreshold) then
-      clr := clr0
-    else
-      clr := clr1;
-  end;
-
 begin
-  bmp := TBGRABitmap.Create(AWidth, AHeight, BGRAPixelTransparent);
-  idx := 0;
-  y := 0;
-
-  if APalette.Count > 0 then
-  begin
-    clr0.FromFPColor(APalette.Color[0]);
-    clr1.FromRGB(255, 255, 255);
-
-    while y < bmp.Height do
-    begin
-      x := 0;
-      while x < bmp.Width do
-      begin
-        if idx >= Length(ABuffer) then Break;
-
-        b := ABuffer[idx] and $FF;
-        Inc(idx);
-
-        if b = 0 then // RLE ID
-        begin
-          if idx >= Length(ABuffer) then Break;
-
-          b := ABuffer[idx] and $FF;
-          Inc(idx);
-
-          if b = 0 then // Next line
-          begin
-            Inc(y);
-            Break;
-          end
-          else if (b and $C0) = $40 then // 0 pixels
-          begin
-            if idx + 1 < Length(ABuffer) then
-            begin
-              len := ((b - $40) shl 8) or (ABuffer[idx] and $FF);
-              Inc(idx);
-              for i := 1 to len do
-              begin
-                bmp.Scanline[y][x] := clr0;
-                Inc(x);
-              end;
-            end;
-          end
-          else if (b and $C0) = $80 then // C pixels (Largo)
-          begin
-            if idx < Length(ABuffer) then
-            begin
-              len := (b - $80);
-              b := ABuffer[idx] and $FF;
-              Inc(idx);
-              clr.FromFPColor(APalette.Color[b]);
-              FixColor(clr); // Aplicar umbral
-              for i := 1 to len do
-              begin
-                bmp.Scanline[y][x] := clr;
-                Inc(x);
-              end;
-            end;
-          end
-          else if (b and $C0) <> 0 then // C pixels (Corto)
-          begin
-            if idx + 1 < Length(ABuffer) then
-            begin
-              len := ((b - $C0) shl 8) or (ABuffer[idx] and $FF);
-              Inc(idx);
-              if idx < Length(ABuffer) then
-              begin
-                b := ABuffer[idx] and $FF;
-                Inc(idx);
-                clr.FromFPColor(APalette.Color[b]);
-                FixColor(clr); // Aplicar umbral
-                for i := 1 to len do
-                begin
-                  bmp.Scanline[y][x] := clr;
-                  Inc(x);
-                end;
-              end;
-            end;
-          end
-          else // 0 pixels (Largo)
-          begin
-            for i := 1 to b do
-            begin
-              bmp.Scanline[y][x] := clr0;
-              Inc(x);
-            end;
-          end;
-        end
-        else // Un pixel color C
-        begin
-          clr.FromFPColor(APalette.Color[b]);
-          FixColor(clr); // Aplicar umbral
-          bmp.Scanline[y][x] := clr;
-          Inc(x);
-        end;
-      end;
-    end;
-    bmp.InvalidateBitmap;
-  end;
-  Result := bmp;
+  Result := DecodeRLEImage(ABuffer, APalette, AWidth, AHeight, AThreshold);
 end;
 
 //------------------------------------------------------------------------------
 
 end.
+

@@ -12,7 +12,7 @@
  *  implied. See the License for the specific language governing
  *  rights and limitations under the License.
  *
- *  Copyright (C) 2023-2024 URUWorks, uruworks@gmail.com.
+ *  Copyright (C) 2023-2026 URUWorks, uruworks@gmail.com.
  *
  *  INFO: https://blog.thescorpius.com/index.php/2017/07/15/presentation-graphic-stream-sup-files-bluray-subtitle-format/
  *
@@ -25,7 +25,8 @@ unit BlurayPGSParser;
 interface
 
 uses
-  Classes, SysUtils, FPImage, Math, BGRABitmap, BlurayPGSParser.Types;
+  Classes, SysUtils, FPImage, Math, BGRABitmap, BGRABitmapTypes,
+  Types, BlurayPGSParser.Types;
 
 type
 
@@ -35,14 +36,17 @@ type
   private
     FDSList: TDisplaySetList;
     FFileStream : TFileStream;
+    FLastError : String;
   public
     constructor Create(const AFileName: String = '');
     destructor Destroy; override;
     function Parse(const AFileName: String): Boolean;
     function GetBitmap(const DisplaySetIndex: Integer; const FullColor: Boolean = True): TBGRABitmap;
     function SaveBitmapToFile(const DisplaySetIndex: Integer; const FileName: String; const FullColor: Boolean = True): Boolean;
+    property LastError: String read FLastError;
   private
     procedure Clear;
+    function ReadPictureBuffer(const APicture: TPictureBuffer): TBytes;
     function ParsePGS(const AStream: TStream; out APGS: TPGS): Boolean;
     function ParsePCS(const AStream: TStream; const APGS: TPGS): Boolean;
     function ParseWDS(const AStream: TStream; const APGS: TPGS): Boolean;
@@ -54,7 +58,7 @@ type
     property DisplaySets: TDisplaySetList read FDSList write FDSList;
   end;
 
-procedure WriteSUPDisplaySet(const AStream: TStream; const ACompositionNumber: Integer; const AInCue, AOutCue: Integer; const AImage: TBGRABitmap; const AVideoWidth, AVideoHeight: Integer; const AMargins: TRect; const AAlignment: TAlignment = taCenter; const AVerticalAlignment: TVerticalAlignment = taAlignBottom);
+procedure WriteSUPDisplaySet(const AStream: TStream; const ACompositionNumber: Integer; const AInCue, AOutCue: Int64; const AImage: TBGRABitmap; const AVideoWidth, AVideoHeight: Integer; const AMargins: TRect; const AAlignment: TAlignment = taCenter; const AVerticalAlignment: TVerticalAlignment = taAlignBottom; const AFrameRate: Byte = frf23976; const AMaxColors: Integer = 256; const ADithering: TDitheringAlgorithm = daFloydSteinberg);
 
 implementation
 
@@ -90,7 +94,7 @@ end;
 
 procedure TBlurayPGSParser.Clear;
 var
-  i, c : Integer;
+  i, c: Integer;
 begin
   for i := 0 to FDSList.Count-1 do
   begin
@@ -113,13 +117,23 @@ end;
 
 function TBlurayPGSParser.Parse(const AFileName: String): Boolean;
 var
-  SegmentCount : Integer;
-  PGS : TPGS;
-  P : Int64;
+  SegmentCount: Integer;
+  PGS: TPGS;
+  P: Int64;
 begin
   Result := False;
+  FLastError := '';
   Clear;
-  if AFileName.IsEmpty or not FileExists(AFileName) then Exit;
+  if AFileName.IsEmpty then
+  begin
+    FLastError := 'Empty file name';
+    Exit;
+  end;
+  if not FileExists(AFileName) then
+  begin
+    FLastError := 'File not found: ' + AFileName;
+    Exit;
+  end;
 
   if Assigned(FFileStream) then
     FFileStream.Free;
@@ -128,9 +142,14 @@ begin
   SegmentCount := 0;
   while ParsePGS(FFileStream, PGS) do
   begin
-    if (PGS.PG[0] <> mwP) and (pgs.PG[1] <> mwG) then
+    // A valid segment header starts with the 'PG' magic word. Either byte
+    // being wrong means we're not aligned on a segment boundary
+    if (PGS.PG[0] <> mwP) or (PGS.PG[1] <> mwG) then
     begin
       {$IFDEF DEBUG}WriteLn('PGS not found at ', FFileStream.Position-SizeOf(PGS));{$ENDIF}
+      // Resync byte by byte instead of jumping a full header size, so we
+      // don't skip past a valid header that happens to start 1-12 bytes in
+      FFileStream.Position := FFileStream.Position - SizeOf(PGS) + 1;
       Continue;
     end;
 
@@ -150,6 +169,8 @@ begin
   end;
   {$IFDEF DEBUG}WriteLn('* DSCount: ', FDSList.Count);{$ENDIF}
   Result := FDSList.Count > 0;
+  if not Result then
+    FLastError := 'No display sets found (file may not be a valid PGS/SUP stream)';
 end;
 
 // -----------------------------------------------------------------------------
@@ -164,10 +185,12 @@ end;
 
 function TBlurayPGSParser.ParsePCS(const AStream: TStream; const APGS: TPGS): Boolean;
 var
-  pcs : TPCS;
-  co : TCO;
-  ds : PDisplaySet;
-  i : Byte;
+  pcs: TPCS;
+  co: TCO;
+  coCropped: TCOCropped;
+  ds: PDisplaySet;
+  i: Byte;
+  objId, objIdx, k: Integer;
 begin
   //WriteLn('* PCS');
   ds := NIL;
@@ -177,9 +200,20 @@ begin
     if pcs.CompositionState = csfEpochStart then
     begin
       New(ds);
+      // Zero-initialize every plain field
       ds^.Text := '';
       ds^.Completed := False;
+      ds^.IsForced := False;
+      ds^.X := 0;
+      ds^.Y := 0;
+      ds^.Width := 0;
+      ds^.Height := 0;
+      ds^.PaletteId := 0;
+      SetLength(ds^.Palettes, 0);
+      SetLength(ds^.Pictures, 0);
+      SetLength(ds^.Objects, 0);
       ds^.InCue := TimestampToMs(Read4Bytes(APGS.PTS));
+      ds^.OutCue := ds^.InCue;
     end
     else
     begin
@@ -197,13 +231,71 @@ begin
     if pcs.NumberOfCompositionObjects > 0 then
     begin
       for i := 0 to pcs.NumberOfCompositionObjects-1 do
+      begin
         AStream.Read(co, SizeOf(co));
 
-      if ds <> NIL then
-      begin
-        ds^.IsForced := (co.ObjectCroppedFlag = ocfForceDisplay);
-        ds^.X := Read2Bytes(co.ObjectHorizontalPosition);
-        ds^.Y := Read2Bytes(co.ObjectVerticalPosition);
+        // Cropped composition objects carry an extra 8-byte crop rect that
+        // must still be consumed from the stream
+        if co.ObjectCroppedFlag = ocfForceDisplay then
+          AStream.Read(coCropped, SizeOf(coCropped));
+
+        if ds <> NIL then
+        begin
+          // Record every composition object (a display set can legally
+          // contain more than one, e.g. two simultaneous subtitle regions)
+          // instead of only keeping the last one read. An acquisition-point
+          // PCS can update the position of an object ID that this same
+          // display set already has, so look for an existing entry with
+          // the same ObjectID and overwrite it in place rather than piling
+          // up stale duplicates
+          objId := Read2Bytes(co.ObjectID);
+          objIdx := -1;
+          for k := 0 to Length(ds^.Objects)-1 do
+            if ds^.Objects[k].ObjectID = objId then
+            begin
+              objIdx := k;
+              Break;
+            end;
+
+          if objIdx < 0 then
+          begin
+            SetLength(ds^.Objects, Length(ds^.Objects)+1);
+            objIdx := High(ds^.Objects);
+          end;
+
+          with ds^.Objects[objIdx] do
+          begin
+            ObjectID := objId;
+            X        := Read2Bytes(co.ObjectHorizontalPosition);
+            Y        := Read2Bytes(co.ObjectVerticalPosition);
+            IsForced := (co.ObjectCroppedFlag = ocfForceDisplay);
+            // Each PCS restates this object from scratch, so HasCrop must
+            // be refreshed every time (an object can switch between
+            // cropped/uncropped across successive updates within the
+            // same display set, e.g. a reveal/typewriter effect)
+            HasCrop := IsForced;
+            if HasCrop then
+            begin
+              CropX      := Read2Bytes(coCropped.ObjectCroppingHorizontalPosition);
+              CropY      := Read2Bytes(coCropped.ObjectCroppingVerticalPosition);
+              CropWidth  := Read2Bytes(coCropped.ObjectCroppingWidth);
+              CropHeight := Read2Bytes(coCropped.ObjectCroppingHeightPosition);
+            end
+            else
+            begin
+              CropX := 0; CropY := 0; CropWidth := 0; CropHeight := 0;
+            end;
+          end;
+
+          // Keep the legacy single X/Y/IsForced fields pointing at the
+          // first object for backwards compatibility with existing callers
+          if objIdx = 0 then
+          begin
+            ds^.IsForced := ds^.Objects[0].IsForced;
+            ds^.X := ds^.Objects[0].X;
+            ds^.Y := ds^.Objects[0].Y;
+          end;
+        end;
       end;
     end;
 
@@ -216,9 +308,9 @@ end;
 
 function TBlurayPGSParser.ParseWDS(const AStream: TStream; const APGS: TPGS): Boolean;
 var
-  wds : TWDSNumberOfWindows;
-  wdse : TWDSEntry;
-  i : Byte;
+  wds: TWDSNumberOfWindows;
+  wdse: TWDSEntry;
+  i: Byte;
 begin
   //WriteLn('* WDS');
   Result := AStream.Read(wds, SizeOf(wds)) = SizeOf(wds);
@@ -231,22 +323,29 @@ end;
 
 function TBlurayPGSParser.ParsePDS(const AStream: TStream; const APGS: TPGS): Boolean;
 var
-  pds : TPDS;
-  pdse : TPDSEntry;
-  ds : PDisplaySet;
-  pal : TPDSEntries;
-  i : Byte;
-  c : Integer;
-  found : Boolean;
+  pds: TPDS;
+  pdse: TPDSEntry;
+  ds: PDisplaySet;
+  pal: TPDSEntries;
+  i: Byte;
+  c: Integer;
+  found: Boolean;
 begin
   //WriteLn('* PDS');
   Result := AStream.Read(pds, SizeOf(pds)) = SizeOf(pds);
+  if not Result then Exit;
   ds := FDSList.Last;
 
   c := (Read2Bytes(APGS.SegmentSize) - SizeOf(pds)) div SizeOf(pdse);
+  // Defensive clamp: a palette can have at most 256 entries. A corrupt or
+  // desynced SegmentSize could otherwise produce a huge/negative count
+  // (and c-1 would overflow the Byte loop variable below)
+  c := EnsureRange(c, 0, 256);
   SetLength(pal, c);
-  for i := 0 to c-1 do
-    AStream.Read(pal[i], SizeOf(pdse));
+
+  if c > 0 then
+    for i := 0 to c-1 do
+      AStream.Read(pal[i], SizeOf(pdse));
 
   if (ds <> NIL) and (c > 0) then
   begin
@@ -279,30 +378,81 @@ end;
 
 function TBlurayPGSParser.ParseODS(const AStream: TStream; const APGS: TPGS): Boolean;
 var
-  ods : TODS;
-  odse : TODSEntry;
-  ds : PDisplaySet;
+  ods: TODS;
+  odse: TODSEntry;
+  ds: PDisplaySet;
+  objId, picIdx, segSize, dataSize, i: Integer;
+  isFirst: Boolean;
 begin
   //WriteLn('* ODS');
-  AStream.Read(ods, SizeOf(ods));
-  AStream.Read(odse, SizeOf(odse));
+  // Per spec, only the FIRST fragment of an object (LastInSequenceFlag has
+  // the $80 bit set) carries the ObjectDataLength/Width/Height header.
+  // Continuation fragments (large images split across several ODS
+  // segments) are pure RLE bytes
+  Result := AStream.Read(ods, SizeOf(ods)) = SizeOf(ods);
+  if not Result then Exit;
 
+  objId := Read2Bytes(ods.ObjectID);
+  isFirst := (ods.LastInSequenceFlag and lsfFirst) <> 0;
+  segSize := Read2Bytes(APGS.SegmentSize);
   ds := FDSList.Last;
-  if ds <> NIL then
+
+  if isFirst then
   begin
-    SetLength(ds^.Pictures, Length(ds^.Pictures)+1);
-    with ds^.Pictures[Length(ds^.Pictures)-1] do
+    if AStream.Read(odse, SizeOf(odse)) <> SizeOf(odse) then Exit;
+    dataSize := segSize - SizeOf(ods) - SizeOf(odse);
+
+    if ds <> NIL then
     begin
-      Size := Read3Bytes(odse.ObjectDataLength)-4;
-      Offset := AStream.Position;
+      SetLength(ds^.Pictures, Length(ds^.Pictures)+1);
+      picIdx := High(ds^.Pictures);
+      with ds^.Pictures[picIdx] do
+      begin
+        ObjectID  := objId;
+        Width     := Read2Bytes(odse.Width);
+        Height    := Read2Bytes(odse.Height);
+        TotalSize := Read3Bytes(odse.ObjectDataLength) - 4;
+        Completed := (ods.LastInSequenceFlag and lsfLast) <> 0;
+        SetLength(Chunks, 1);
+        Chunks[0].Offset := AStream.Position;
+        Chunks[0].Size   := dataSize;
+      end;
+      // Legacy convenience fields, kept for callers that only look at a
+      // single image per display set
+      ds^.Width := Read2Bytes(odse.Width);
+      ds^.Height := Read2Bytes(odse.Height);
     end;
-    ds^.Width := Read2Bytes(odse.Width);
-    ds^.Height := Read2Bytes(odse.Height);
   end
   else
-    AStream.Position := AStream.Position + Read3Bytes(odse.ObjectDataLength)-4;
+  begin
+    dataSize := segSize - SizeOf(ods);
 
-  Result := True;
+    if ds <> NIL then
+    begin
+      // Find the still-open picture with the same ObjectID to append to
+      picIdx := -1;
+      for i := High(ds^.Pictures) downto 0 do
+        if (ds^.Pictures[i].ObjectID = objId) and not ds^.Pictures[i].Completed then
+        begin
+          picIdx := i;
+          Break;
+        end;
+
+      if picIdx >= 0 then
+        with ds^.Pictures[picIdx] do
+        begin
+          SetLength(Chunks, Length(Chunks)+1);
+          Chunks[High(Chunks)].Offset := AStream.Position;
+          Chunks[High(Chunks)].Size   := dataSize;
+          if (ods.LastInSequenceFlag and lsfLast) <> 0 then
+            Completed := True;
+        end
+      {$IFDEF DEBUG}
+      else
+        WriteLn('ODS continuation fragment with no matching open object: ', objId);
+      {$ENDIF}
+    end;
+  end;
 end;
 
 // -----------------------------------------------------------------------------
@@ -333,61 +483,170 @@ end;
 
 // -----------------------------------------------------------------------------
 
+function TBlurayPGSParser.ReadPictureBuffer(const APicture: TPictureBuffer): TBytes;
+// Reads every chunk of a (possibly fragmented) picture from the source
+// file and concatenates them into a single RLE buffer
+var
+  j, total, bufPos : Integer;
+begin
+  total := 0;
+  for j := 0 to High(APicture.Chunks) do
+    Inc(total, APicture.Chunks[j].Size);
+
+  SetLength(Result, total);
+  bufPos := 0;
+  for j := 0 to High(APicture.Chunks) do
+  begin
+    FFileStream.Position := APicture.Chunks[j].Offset;
+    FFileStream.Read(Result[bufPos], APicture.Chunks[j].Size);
+    Inc(bufPos, APicture.Chunks[j].Size);
+  end;
+end;
+
+// -----------------------------------------------------------------------------
+
 function TBlurayPGSParser.GetBitmap(const DisplaySetIndex: Integer; const FullColor: Boolean = True): TBGRABitmap;
 var
-  ds : PDisplaySet;
-  buf : TBytes;
-  pal : TFPPalette = NIL;
-  idx, c, i : Integer;
+  ds: PDisplaySet;
+  buf: TBytes;
+  pal: TFPPalette = NIL;
+  idx, c, i: Integer;
+  minX, minY, maxX, maxY: Integer;
+  drawX, drawY, drawW, drawH, srcX, srcY: Integer;
+  picBmp: TBGRABitmap;
+  partBmp: TBGRACustomBitmap;
+
+  // Resolves where picture I actually ends up on screen: ADrawX/Y/W/H is
+  // the visible rectangle (screen coordinates), ASrcX/Y is where that
+  // rectangle starts inside the decoded picture. Without cropping this is
+  // just the object's own position and full size; with cropping (see
+  // TObjectPosition.HasCrop) it's clipped to the declared crop rectangle
+  procedure GetPlacement(const APicIndex: Integer; out ADrawX, ADrawY, ADrawW, ADrawH, ASrcX, ASrcY: Integer);
+  var
+    k, pw, ph : Integer;
+    obj : TObjectPosition;
+    hasObj : Boolean;
+  begin
+    hasObj := False;
+    obj.X := 0; obj.Y := 0; obj.HasCrop := False;
+    obj.CropX := 0; obj.CropY := 0; obj.CropWidth := 0; obj.CropHeight := 0;
+
+    for k := 0 to High(ds^.Objects) do
+      if ds^.Objects[k].ObjectID = ds^.Pictures[APicIndex].ObjectID then
+      begin
+        obj := ds^.Objects[k];
+        hasObj := True;
+        Break;
+      end;
+
+    pw := ds^.Pictures[APicIndex].Width;
+    ph := ds^.Pictures[APicIndex].Height;
+
+    ASrcX := 0;
+    ASrcY := 0;
+    ADrawX := obj.X;
+    ADrawY := obj.Y;
+    ADrawW := pw;
+    ADrawH := ph;
+
+    if hasObj and obj.HasCrop then
+    begin
+      // The crop rect is declared in the same screen coordinate space as
+      // the object position; clip it to the object's own bounds first
+      // (a malformed/edge-case stream could otherwise send us out of
+      // range) and translate it into the decoded picture's local space
+      ADrawX := EnsureRange(obj.CropX, obj.X, obj.X + pw);
+      ADrawY := EnsureRange(obj.CropY, obj.Y, obj.Y + ph);
+      ADrawW := EnsureRange(obj.CropWidth, 0, obj.X + pw - ADrawX);
+      ADrawH := EnsureRange(obj.CropHeight, 0, obj.Y + ph - ADrawY);
+      ASrcX := ADrawX - obj.X;
+      ASrcY := ADrawY - obj.Y;
+    end;
+  end;
+
 begin
   Result := NIL;
-  if (FDSList.Count > 0) and InRange(DisplaySetIndex, 0, FDSList.Count-1) then
+  if not ((FDSList.Count > 0) and InRange(DisplaySetIndex, 0, FDSList.Count-1)) then Exit;
+
+  ds := FDSList[DisplaySetIndex];
+  if ds = NIL then Exit;
+
+  idx := Length(ds^.Palettes);
+  if idx = 0 then Exit;
+
+  with ds^.Palettes[idx-1] do
   begin
-    ds := FDSList[DisplaySetIndex];
-    if ds <> NIL then
+    c := Length(Entries);
+    if c = 0 then Exit;
+
+    pal := TFPPalette.Create(c);
+    pal.Count := c;
+    if pal.Count < 256 then
+      pal.Count := 256;
+
+    for i := 0 to pal.Count-1 do
+      pal[i] := FPColor(0, 0, 0, 0);
+
+    for i := 0 to c-1 do
+      pal[Entries[i].PaletteEntryID] := YCbCrToFPColor(Entries[i].Luminance, Entries[i].ColorDifferenceBlue, Entries[i].ColorDifferenceRed, Entries[i].Transparency);
+  end;
+
+  try
+    c := Length(ds^.Pictures);
+    if c = 0 then Exit;
+
+    // First pass: work out each picture's visible rect and the combined
+    // bounding box of the whole composite (this also covers the common
+    // single-picture, uncropped case - the box just ends up being that
+    // one picture's own rect, same result as before)
+    minX := MaxInt; minY := MaxInt; maxX := 0; maxY := 0;
+    for i := 0 to c-1 do
     begin
-      idx := Length(ds^.Palettes);
-      if idx > 0 then
-      begin
-        with ds^.Palettes[idx-1] do
-        begin
-          c := Length(Entries);
-          if c > 0 then
-          begin
-            pal := TFPPalette.Create(c);
-            pal.Count := c;
+      GetPlacement(i, drawX, drawY, drawW, drawH, srcX, srcY);
+      if (drawW <= 0) or (drawH <= 0) then Continue; // fully cropped out
 
-            if pal.Count < 256 then
-              pal.Count := 256;
-
-            for i := 0 to pal.Count-1 do
-              pal[i] := FPColor(0, 0, 0, 0);
-
-            for i := 0 to c-1 do
-            begin
-              pal[Entries[i].PaletteEntryID] := YCbCrToFPColor(Entries[i].Luminance, Entries[i].ColorDifferenceBlue, Entries[i].ColorDifferenceRed, Entries[i].Transparency);
-              //{$IFDEF DEBUG}WriteLn(i, ' ', Entries[i].PaletteEntryID, ': Y:', Entries[i].Luminance, ' Cb:', Entries[i].ColorDifferenceBlue, ' Cr:', Entries[i].ColorDifferenceRed, ' a:', Entries[i].Transparency);{$ENDIF}
-            end;
-          end;
-        end;
-
-        if pal = NIL then Exit;
-
-        c := Length(ds^.Pictures);
-        if c > 0 then
-        begin
-          SetLength(buf, ds^.Pictures[0].Size);
-          FFileStream.Position := ds^.Pictures[0].Offset;
-          FFileStream.Read(buf[0], Length(buf));
-          if FullColor then
-            Result := DecodeImage(buf, pal, ds^.Width, ds^.Height)
-          else
-            Result := DecodeImage2Colors(buf, pal, ds^.Width, ds^.Height);
-          SetLength(buf, 0);
-        end;
-        pal.Free;
-      end;
+      if drawX < minX then minX := drawX;
+      if drawY < minY then minY := drawY;
+      if drawX + drawW > maxX then maxX := drawX + drawW;
+      if drawY + drawH > maxY then maxY := drawY + drawH;
     end;
+
+    if minX = MaxInt then Exit; // nothing actually visible
+
+    Result := TBGRABitmap.Create(Max(1, maxX-minX), Max(1, maxY-minY), BGRAPixelTransparent);
+
+    // Second pass: decode and draw each picture at its resolved position
+    for i := 0 to c-1 do
+    begin
+      GetPlacement(i, drawX, drawY, drawW, drawH, srcX, srcY);
+      if (drawW <= 0) or (drawH <= 0) then Continue;
+
+      buf := ReadPictureBuffer(ds^.Pictures[i]);
+      if FullColor then
+        picBmp := DecodeImage(buf, pal, ds^.Pictures[i].Width, ds^.Pictures[i].Height)
+      else
+        picBmp := DecodeImage2Colors(buf, pal, ds^.Pictures[i].Width, ds^.Pictures[i].Height);
+
+      if (srcX = 0) and (srcY = 0) and (drawW = picBmp.Width) and (drawH = picBmp.Height) then
+        Result.PutImage(drawX - minX, drawY - minY, picBmp, dmDrawWithTransparency)
+      else
+      begin
+        // Cropped: only the visible sub-rectangle gets drawn
+        partBmp := picBmp.GetPart(Rect(srcX, srcY, srcX + drawW, srcY + drawH));
+        Result.PutImage(drawX - minX, drawY - minY, partBmp, dmDrawWithTransparency);
+        partBmp.Free;
+      end;
+      picBmp.Free;
+    end;
+
+    // Reflect the composite/visible region so consumers positioning the
+    // result via ds^.X/Y/Width/Height still line things up correctly
+    ds^.X := minX;
+    ds^.Y := minY;
+    ds^.Width := maxX - minX;
+    ds^.Height := maxY - minY;
+  finally
+    pal.Free;
   end;
 end;
 
@@ -395,7 +654,7 @@ end;
 
 function TBlurayPGSParser.SaveBitmapToFile(const DisplaySetIndex: Integer; const FileName: String; const FullColor: Boolean = True): Boolean;
 var
-  bmp : TBGRABitmap;
+  bmp: TBGRABitmap;
 begin
   Result := False;
   if FileName.IsEmpty then Exit;
@@ -416,30 +675,32 @@ end;
 
 // -----------------------------------------------------------------------------
 
-procedure WriteSUPDisplaySet(const AStream: TStream; const ACompositionNumber: Integer; const AInCue, AOutCue: Integer; const AImage: TBGRABitmap; const AVideoWidth, AVideoHeight: Integer; const AMargins: TRect; const AAlignment: TAlignment = taCenter; const AVerticalAlignment: TVerticalAlignment = taAlignBottom);
+procedure WriteSUPDisplaySet(const AStream: TStream; const ACompositionNumber: Integer; const AInCue, AOutCue: Int64; const AImage: TBGRABitmap; const AVideoWidth, AVideoHeight: Integer; const AMargins: TRect; const AAlignment: TAlignment = taCenter; const AVerticalAlignment: TVerticalAlignment = taAlignBottom; const AFrameRate: Byte = frf23976; const AMaxColors: Integer = 256; const ADithering: TDitheringAlgorithm = daFloydSteinberg);
 var
-  pal : TFPPalette = NIL;
-  rlebuf : TBytes;
-  rlesize : Integer;
-  x, it, ft : Integer;
-  Xoffset, Yoffset : Integer;
-  Y, Cb, Cr : Byte;
-  pgs : TPGS;
-  pcs : TPCS;
-  wds : TWDSNumberOfWindows;
-  wdse : TWDSEntry;
-  pds : TPDS;
-  pdse : TPDSEntry;
-  ods : TODS;
-  odse : TODSEntry;
-  co  : TCO;
+  pal: TFPPalette = NIL;
+  rlebuf: TBytes;
+  rlesize: Integer;
+  x: Integer;
+  it, ft: Int64;
+  Xoffset, Yoffset: Integer;
+  Y, Cb, Cr: Byte;
+  pgs: TPGS;
+  pcs: TPCS;
+  wds: TWDSNumberOfWindows;
+  wdse: TWDSEntry;
+  pds: TPDS;
+  pdse: TPDSEntry;
+  ods: TODS;
+  odse: TODSEntry;
+  co: TCO;
 begin
   // Set 90kHz times
   it := MsToTimestamp(AInCue);
   ft := MsToTimestamp(AOutCue);
 
   // Get image buffer/pallete
-  rlesize := EncodeImage(AImage, rlebuf, pal);
+  rlesize := EncodeImage(AImage, rlebuf, pal, AMaxColors, ADithering);
+  try
 
   // Prepare alignments
   case AAlignment of
@@ -500,7 +761,7 @@ begin
   begin
     Set2Bytes(VideoWidth, AVideoWidth);
     Set2Bytes(VideoHeight, AVideoHeight);
-    FrameRate := frf23976;
+    FrameRate := AFrameRate;
     Set2Bytes(CompositionNumber, ACompositionNumber);
     CompositionState := csfEpochStart;
     PaletteUpdateFlag := pufFalse;
@@ -508,6 +769,7 @@ begin
     NumberOfCompositionObjects := 1;
   end;
   AStream.Write(pcs, SizeOf(pcs));
+
   // CO
   with co do
   begin
@@ -559,11 +821,10 @@ begin
         Luminance := Y;
         ColorDifferenceRed := Cr;
         ColorDifferenceBlue := Cb;
-        Transparency := pal.Color[x].Alpha;
+        Transparency := Hi(pal.Color[x].Alpha);
         AStream.Write(pdse, SizeOf(pdse));
       end;
     end;
-    pal.Free;
   end;
 
   // ODS
@@ -588,7 +849,6 @@ begin
   end;
   AStream.Write(odse, SizeOf(odse));
   AStream.Write(rlebuf[0], rlesize); // RLE Data
-  SetLength(rlebuf, 0);
 
   // END 'IT'
   with pgs do
@@ -631,9 +891,13 @@ begin
     Set2Bytes(SegmentSize, 0);
   end;
   AStream.Write(pgs, SizeOf(pgs));
+
+  finally
+    pal.Free;
+    SetLength(rlebuf, 0);
+  end;
 end;
 
 // -----------------------------------------------------------------------------
 
 end.
-
